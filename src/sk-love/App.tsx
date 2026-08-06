@@ -6895,6 +6895,22 @@ const [isPartyGiftPopupOpen, setIsPartyGiftPopupOpen] = useState<boolean>(false)
   const sendLiveReaction = async (emoji: string) => {
     spawnLiveReaction(emoji);
     setIsLiveReactionPickerOpen(false);
+
+    // Optimistically add reaction to chat comments as well
+    const myName = String(registerName || "You");
+    const myAvatar = profileAvatarImg || null;
+    const optId = -(Date.now() + Math.floor(Math.random() * 1000));
+    setComments((prev) => [
+      ...prev,
+      {
+        id: optId,
+        name: myName,
+        avatar: myAvatar,
+        text: `reacted ${emoji}`,
+        badge: "Reaction",
+      },
+    ]);
+
     if (!activeLiveRoom?.id || appSection !== "stream") return;
     try {
       const res: any = await api.post(`/api/live-rooms/${activeLiveRoom.id}/messages`, {
@@ -6919,19 +6935,21 @@ const [isPartyGiftPopupOpen, setIsPartyGiftPopupOpen] = useState<boolean>(false)
       liveRoomMessageIdsRef.current.add(id);
       return true;
     });
-    // Reactions float over the video instead of joining the comment list.
+    // Reactions float over the video AND join the comment stream.
     fresh
       .filter((message) => message.kind === "reaction")
       .forEach((message) => spawnLiveReaction(String(message.body || "❤️").slice(0, 8)));
-    const nextComments = fresh
-      .filter((message) => message.kind !== "reaction")
-      .map((message) => ({
+    const nextComments = fresh.map((message) => {
+      const isReaction = message.kind === "reaction";
+      const isGift = message.kind === "gift";
+      return {
         id: Number(message.id),
         name: message.name || "SK Love User",
         avatar: message.avatar || message.userAvatar || null,
-        text: message.body || "",
-        badge: message.kind === "gift" ? "Gift" : "Live",
-      }));
+        text: isReaction ? `reacted ${message.body || "❤️"}` : (message.body || ""),
+        badge: isGift ? "Gift" : isReaction ? "Reaction" : "Live",
+      };
+    });
     if (nextComments.length > 0) {
       setComments((prev) => [...prev, ...nextComments]);
       const freshGifts = nextComments.filter((message) => message.badge === "Gift");
@@ -10742,6 +10760,13 @@ const [isPartyGiftPopupOpen, setIsPartyGiftPopupOpen] = useState<boolean>(false)
     const track = agoraRemoteAudioTracksByUidRef.current[uid];
     setHostMutedLiveUserIds((current) => {
       const muted = current.includes(userId);
+      const nextMuted = !muted;
+      if (activeLiveRoom?.id) {
+        api.post(`/api/live-rooms/${activeLiveRoom.id}/cohosts/${userId}/mute`, {
+          muted: nextMuted,
+          is_muted: nextMuted,
+        }).catch(() => null);
+      }
       if (muted) {
         try {
           track?.play?.();
@@ -10804,6 +10829,23 @@ const [isPartyGiftPopupOpen, setIsPartyGiftPopupOpen] = useState<boolean>(false)
       await refreshLiveCohostState();
       const currentUserId = getCurrentUserId();
       const response: any = await api.get(`/api/live-rooms/${activeLiveRoom.id}/cohosts`).catch(() => null);
+      if (Array.isArray(response?.data)) {
+        const serverMuted = response.data
+          .filter((c: any) => Boolean(c?.muted || c?.is_muted || c?.isMuted || c?.is_mute || c?.muted === 1 || c?.muted === "1"))
+          .map((c: any) => Number(c?.userId ?? c?.user_id ?? c?.user?.id ?? c?.id ?? 0))
+          .filter((id: number) => id > 0);
+        if (serverMuted.length > 0) {
+          setHostMutedLiveUserIds((prev) => Array.from(new Set([...prev, ...serverMuted])));
+        }
+      }
+
+      if (currentUserId && hostMutedLiveUserIds.some((id) => String(id) === String(currentUserId))) {
+        setIsStreamMicMuted(true);
+        if (agoraLocalAudioTrackRef.current) {
+          void agoraLocalAudioTrackRef.current.setEnabled(false).catch(() => {});
+        }
+      }
+
       const approved = Array.isArray(response?.data)
         ? response.data.some((cohost: any) => Number(cohost.userId) === Number(currentUserId))
         : false;
